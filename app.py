@@ -1,8 +1,16 @@
 import os
+import io
+import re
+import html
 import json
+import shutil
+import zipfile
+import tempfile
+import datetime as dt
 import pandas as pd
 import anthropic
 import streamlit as st
+from openpyxl import load_workbook
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -166,8 +174,188 @@ def check_password():
 if not check_password():
     st.stop()
 
+# ══════════════════════════════════════════════════════
+# 카드사 변환 관련 함수
+# ══════════════════════════════════════════════════════
+TEMPLATE_PATH = os.path.join(BASE_DIR, "신용카드매입자료_업로드_기본서식.xlsx")
+
+ACCOUNT_CODE_MAP = {
+    "복리후생비": "811", "여비교통비": "812", "접대비": "813",
+    "통신비": "814", "수도광열비": "815", "전력비": "816",
+    "세금과공과금": "817", "임차료": "819", "수선비": "820",
+    "보험료": "821", "차량유지비": "822", "운반비": "824",
+    "교육훈련비": "825", "도서인쇄비": "826", "회의비": "827",
+    "포장비": "828", "사무용품비": "829", "소모품비": "830",
+    "수수료비용": "831", "보관료": "832", "광고선전비": "833",
+    "건물관리비": "837", "미분류": "",
+}
+
+DEFAULT_RULES = {
+    "keyword": [
+        {"match": ["주유소","SK에너지","GS칼텍스","현대오일뱅크","S-OIL"], "account": "차량유지비", "vat": "공제"},
+        {"match": ["정비","카센터","타이어","세차"], "account": "차량유지비", "vat": "공제"},
+        {"match": ["통행료","하이패스","주차","한국도로공사"], "account": "차량유지비", "vat": "공제"},
+        {"match": ["충전","일렉링크","전기차충전"], "account": "차량유지비", "vat": "공제"},
+        {"match": ["GS25","CU","세븐일레븐","이마트24","미니스톱","씨유"], "account": "복리후생비", "vat": "공제"},
+        {"match": ["이마트","홈플러스","롯데마트"], "account": "복리후생비", "vat": "공제"},
+        {"match": ["맥도날드","버거킹","롯데리아","KFC","한솥도시락"], "account": "복리후생비", "vat": "공제"},
+        {"match": ["스타벅스","커피","카페","빽다방","투썸"], "account": "접대비", "vat": "불공제"},
+        {"match": ["SK텔레콤","KT","LG유플러스","SKT","LGU+"], "account": "통신비", "vat": "공제"},
+        {"match": ["호텔","모텔","펜션","아난티"], "account": "여비교통비", "vat": "공제"},
+        {"match": ["택시","카카오T"], "account": "여비교통비", "vat": "공제"},
+        {"match": ["병원","의원","한의원","치과"], "account": "복리후생비", "vat": "불공제"},
+        {"match": ["약국"], "account": "복리후생비", "vat": "불공제"},
+        {"match": ["우체국"], "account": "통신비", "vat": "불공제"},
+    ],
+    "industry": [
+        {"match": ["주유소"], "account": "차량유지비", "vat": "공제"},
+        {"match": ["편의점"], "account": "복리후생비", "vat": "공제"},
+        {"match": ["음식점","한식","중식","일식","양식","부페"], "account": "접대비", "vat": "불공제"},
+        {"match": ["커피전문점"], "account": "접대비", "vat": "불공제"},
+        {"match": ["숙박업","호텔"], "account": "여비교통비", "vat": "공제"},
+        {"match": ["통신사"], "account": "통신비", "vat": "공제"},
+        {"match": ["통행료"], "account": "차량유지비", "vat": "공제"},
+    ]
+}
+
+
+def parse_filename_card(filename):
+    base = os.path.splitext(filename)[0]
+    parts = base.split("_")
+    if len(parts) >= 4:
+        return {"업체명": parts[0], "사업자번호": parts[1], "신용카드사명": parts[2], "신용카드번호": parts[3]}
+    return {"업체명": "", "사업자번호": "", "신용카드사명": "", "신용카드번호": ""}
+
+
+def classify_transaction(vendor, industry, rules):
+    vendor = str(vendor) if vendor else ""
+    industry = str(industry) if industry else ""
+    for rule in rules["keyword"]:
+        for kw in rule["match"]:
+            if kw in vendor:
+                return rule["account"], rule["vat"], "키워드"
+    if industry and industry not in ("nan", ""):
+        for rule in rules["industry"]:
+            for kw in rule["match"]:
+                if kw in industry:
+                    return rule["account"], rule["vat"], "업종"
+    return "미분류", "공제", "미분류"
+
+
+def process_card_data(vendor, date, total, bizno, upjong, card_company, card_number):
+    supply = (total / 1.1).astype(int)
+    vat = total - supply
+    accounts, vat_deds, methods = [], [], []
+    for v, u in zip(vendor, upjong):
+        acc, vd, m = classify_transaction(v, u, DEFAULT_RULES)
+        accounts.append(acc); vat_deds.append(vd); methods.append(m)
+    vat_types = [57 if v == "공제" else "" for v in vat_deds]
+    account_codes = [ACCOUNT_CODE_MAP.get(a, "") for a in accounts]
+    result = pd.DataFrame({
+        "카드종류": 1, "신용카드사명": card_company, "신용카드번호": card_number,
+        "승인일자": date.dt.strftime("%Y%m%d"), "사업자등록번호": bizno,
+        "거래처명": vendor.str.slice(0, 15), "거래처유형": "",
+        "공급가액": supply, "세액": vat, "봉사료": 0, "합계금액": total,
+        "부가세공제여부": vat_deds, "부가세유형": vat_types,
+        "계정과목": account_codes, "품목(적요)": upjong.str.slice(0, 30) if hasattr(upjong, "str") else "",
+    })
+    stats = pd.DataFrame({
+        "가맹점명": vendor, "업종": upjong, "계정과목": accounts,
+        "부가세": vat_deds, "분류방법": methods, "금액": total
+    })
+    return result, stats
+
+
+def parse_samsung_card(file_bytes, card_company, card_number):
+    df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None)
+    header_row = None
+    for i in range(min(100, len(df_raw))):
+        row_join = " ".join("" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x) for x in df_raw.iloc[i].tolist())
+        if ("이용일" in row_join or "승인일자" in row_join) and ("가맹점명" in row_join or "가맹점" in row_join) and "금액" in row_join:
+            header_row = i; break
+    if header_row is None: header_row = 19
+    df_table = pd.read_excel(io.BytesIO(file_bytes), header=header_row)
+    cols = [str(c).strip() if str(c) != "nan" else f"col{j}" for j, c in enumerate(df_table.iloc[0].tolist())]
+    df = df_table.iloc[1:].copy(); df.columns = cols; df = df.reset_index(drop=True)
+    def pick(cands):
+        for c in cands:
+            if c in df.columns: return c
+        return None
+    col_v = pick(["가맹점명","가맹점","상호"]); col_d = pick(["이용일","승인일자","거래일"])
+    col_t = pick(["이용금액(원)","이용금액","금액"]); col_b = pick(["사업자번호","사업자등록번호"])
+    col_u = pick(["업종","업태"])
+    vendor = df[col_v].astype(str).str.replace(r"_x000D_", "", regex=True).str.strip()
+    date = pd.to_datetime(df[col_d], errors="coerce")
+    total = pd.to_numeric(df[col_t], errors="coerce").fillna(0).astype(int)
+    bizno = df[col_b].apply(lambda x: re.sub(r"\D", "", str(x))[:10]) if col_b else pd.Series([""] * len(df))
+    upjong = df[col_u].astype(str) if col_u else pd.Series([""] * len(df))
+    mask = date.notna() & (total != 0)
+    return process_card_data(vendor[mask], date[mask], total[mask], bizno[mask], upjong[mask], card_company, card_number)
+
+
+def parse_hana_card(file_bytes, card_company, card_number):
+    df = pd.read_excel(io.BytesIO(file_bytes), header=12)
+    df = df[df['취소일자'].isna() | (df['취소일자'] == '취소일자')]
+    vendor = df['가맹점명'].astype(str).str.strip()
+    date = pd.to_datetime(df['매출일자'], errors="coerce")
+    total = pd.to_numeric(df['원화\n사용금액'], errors="coerce").fillna(0).astype(int)
+    bizno = df['가맹점\n사업자번호'].astype(str).str.replace("-", "").str[:10]
+    upjong = df['업종명'].astype(str) if '업종명' in df.columns else pd.Series([""] * len(df))
+    mask = date.notna() & (total != 0)
+    return process_card_data(vendor[mask], date[mask], total[mask], bizno[mask], upjong[mask], card_company, card_number)
+
+
+def fix_html_entities(xlsx_path):
+    tmp = tempfile.mkdtemp()
+    try:
+        with zipfile.ZipFile(xlsx_path, 'r') as z: z.extractall(tmp)
+        for sub in ['xl/worksheets', 'xl']:
+            d = os.path.join(tmp, sub)
+            if not os.path.exists(d): continue
+            for fn in os.listdir(d):
+                if fn.endswith('.xml'):
+                    fp = os.path.join(d, fn)
+                    content = open(fp, encoding='utf-8').read()
+                    open(fp, 'w', encoding='utf-8').write(html.unescape(content))
+        with zipfile.ZipFile(xlsx_path, 'w', zipfile.ZIP_DEFLATED) as z:
+            for root, _, files in os.walk(tmp):
+                for f in files: z.write(os.path.join(root, f), os.path.relpath(os.path.join(root, f), tmp))
+    finally:
+        shutil.rmtree(tmp)
+
+
+def write_to_template(rows_df, company_name, business_number):
+    tmp_path = tempfile.mktemp(suffix=".xlsx")
+    shutil.copy2(TEMPLATE_PATH, tmp_path)
+    wb = load_workbook(tmp_path)
+    ws = wb.active
+    ws['A4'] = company_name; ws['C4'] = business_number
+    for r in range(10, 10 + len(rows_df) + 10):
+        for c in range(1, 16): ws.cell(r, c).value = None
+    for idx, row in rows_df.iterrows():
+        r = 10 + list(rows_df.index).index(idx)
+        ws.cell(r, 1).value = int(row['카드종류']); ws.cell(r, 2).value = row['신용카드사명']
+        ws.cell(r, 3).value = row['신용카드번호']; ws.cell(r, 4).value = row['승인일자']
+        ws.cell(r, 5).value = row['사업자등록번호']; ws.cell(r, 6).value = row['거래처명']
+        ws.cell(r, 7).value = row['거래처유형'] or None
+        ws.cell(r, 8).value = int(row['공급가액']); ws.cell(r, 9).value = int(row['세액'])
+        ws.cell(r, 10).value = int(row['봉사료']); ws.cell(r, 11).value = int(row['합계금액'])
+        ws.cell(r, 12).value = row['부가세공제여부']
+        ws.cell(r, 13).value = int(row['부가세유형']) if row['부가세유형'] != "" else None
+        ws.cell(r, 14).value = row['계정과목']
+        ws.cell(r, 15).value = row['품목(적요)'] or None
+    ws.cell(9, 8).value = int(rows_df['공급가액'].sum())
+    ws.cell(9, 9).value = int(rows_df['세액'].sum())
+    ws.cell(9, 10).value = int(rows_df['봉사료'].sum())
+    ws.cell(9, 11).value = int(rows_df['합계금액'].sum())
+    wb.save(tmp_path); fix_html_entities(tmp_path)
+    with open(tmp_path, 'rb') as f: data = f.read()
+    os.remove(tmp_path)
+    return data
+
+
 # ── 탭 구성 ──────────────────────────────────────────
-tab1, tab2 = st.tabs(["📊 경비율 계산기", "🧾 종합소득세 계산기"])
+tab1, tab2, tab3 = st.tabs(["📊 경비율 계산기", "🧾 종합소득세 계산기", "💳 카드사 변환기"])
 
 
 # ════════════════════════════════════════════════════
@@ -372,3 +560,121 @@ with tab2:
 
         st.caption(f"※ 적용 세율: {적용세율*100:.0f}% / 누진공제: {누진공제액:,.0f}원 / 지방소득세는 납부세액의 10%")
         st.caption("※ 본 계산은 추정값이며 실제 세액은 세무사 확인 후 신고하시기 바랍니다.")
+
+
+# ════════════════════════════════════════════════════
+# TAB 3 : 카드사 변환기
+# ════════════════════════════════════════════════════
+with tab3:
+    st.title("💳 카드사 통합 변환기")
+    st.caption("카드사 엑셀 파일을 업로드하면 세무사랑 업로드용 파일로 자동 변환합니다.")
+
+    st.info("📌 파일명 형식: **업체명_사업자번호_카드사명_카드번호.xlsx**\n\n예) 홍길동_1234567890_삼성카드_1234-5678-9012-3456.xlsx")
+
+    st.subheader("① 카드사 파일 업로드")
+    st.caption("삼성카드, 하나카드 지원 / 여러 파일 동시 업로드 가능")
+    uploaded_cards = st.file_uploader(
+        "카드사 엑셀 파일 선택",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key="card_files"
+    )
+
+    if uploaded_cards:
+        st.divider()
+        if st.button("🔄 변환 시작", use_container_width=True, type="primary"):
+            all_rows, all_stats = [], []
+            errors = []
+
+            with st.spinner("변환 중..."):
+                for uf in uploaded_cards:
+                    info = parse_filename_card(uf.name)
+                    card_co = info["신용카드사명"]
+                    card_no = info["신용카드번호"]
+                    file_bytes = uf.read()
+
+                    try:
+                        if "삼성" in card_co:
+                            rows, stats = parse_samsung_card(file_bytes, card_co, card_no)
+                        elif "하나" in card_co:
+                            rows, stats = parse_hana_card(file_bytes, card_co, card_no)
+                        else:
+                            errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})")
+                            continue
+                        all_rows.append(rows)
+                        all_stats.append(stats)
+                    except Exception as e:
+                        errors.append(f"❌ {uf.name}: {e}")
+
+            if errors:
+                for e in errors: st.error(e)
+
+            if all_rows:
+                combined = pd.concat(all_rows, ignore_index=True)
+                stats_df = pd.concat(all_stats, ignore_index=True)
+
+                total_cnt = len(combined)
+                classified = len(stats_df[stats_df['계정과목'] != '미분류'])
+                unclassified = total_cnt - classified
+                first_info = parse_filename_card(uploaded_cards[0].name)
+
+                st.divider()
+                st.subheader("📊 변환 결과")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("총 거래건수", f"{total_cnt:,}건")
+                c2.metric("자동 분류", f"{classified:,}건", f"{classified/total_cnt*100:.1f}%")
+                c3.metric("미분류", f"{unclassified:,}건", delta_color="inverse")
+
+                amt_col = st.columns(3)
+                amt_col[0].metric("공급가액 합계", f"{combined['공급가액'].sum():,.0f}원")
+                amt_col[1].metric("세액 합계", f"{combined['세액'].sum():,.0f}원")
+                amt_col[2].metric("합계금액", f"{combined['합계금액'].sum():,.0f}원")
+
+                # 계정과목별 집계
+                st.divider()
+                st.subheader("📋 계정과목별 집계")
+                summary = stats_df.groupby('계정과목')['금액'].agg(['count','sum']).reset_index()
+                summary.columns = ['계정과목', '건수', '금액합계']
+                summary['금액합계'] = summary['금액합계'].apply(lambda x: f"{x:,.0f}원")
+                st.dataframe(summary, use_container_width=True, hide_index=True)
+
+                if unclassified > 0:
+                    st.warning(f"⚠️ 미분류 {unclassified}건은 리포트 파일에서 확인 후 수동 수정하세요.")
+
+                st.divider()
+                st.subheader("⬇️ 파일 다운로드")
+
+                # 세무사랑 파일 생성
+                try:
+                    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    세무사랑_data = write_to_template(
+                        combined,
+                        first_info["업체명"],
+                        first_info["사업자번호"]
+                    )
+                    dl1, dl2 = st.columns(2)
+                    with dl1:
+                        st.download_button(
+                            label="📥 세무사랑 업로드 파일",
+                            data=세무사랑_data,
+                            file_name=f"세무사랑_통합_{ts}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            type="primary"
+                        )
+                    with dl2:
+                        buf = io.BytesIO()
+                        stats_df.to_excel(buf, index=False, engine='openpyxl')
+                        st.download_button(
+                            label="📊 분류 리포트",
+                            data=buf.getvalue(),
+                            file_name=f"분류리포트_{ts}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                except Exception as e:
+                    st.error(f"파일 생성 오류: {e}")
+                    st.info("세무사랑 템플릿 없이 리포트만 다운로드 가능합니다.")
+                    buf = io.BytesIO()
+                    stats_df.to_excel(buf, index=False, engine='openpyxl')
+                    st.download_button("📊 분류 리포트 다운로드", buf.getvalue(), f"분류리포트_{ts}.xlsx")
