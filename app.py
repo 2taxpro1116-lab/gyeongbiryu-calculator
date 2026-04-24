@@ -220,11 +220,17 @@ DEFAULT_RULES = {
 
 
 def parse_filename_card(filename):
+    # 형식: 상호명_사업자번호_카드사_카드번호_직원유무_차량유무.xlsx
     base = os.path.splitext(filename)[0]
     parts = base.split("_")
-    if len(parts) >= 4:
-        return {"업체명": parts[0], "사업자번호": parts[1], "신용카드사명": parts[2], "신용카드번호": parts[3]}
-    return {"업체명": "", "사업자번호": "", "신용카드사명": "", "신용카드번호": ""}
+    result = {"업체명": "", "사업자번호": "", "신용카드사명": "", "신용카드번호": "", "직원유무": "", "차량유무": ""}
+    if len(parts) >= 1: result["업체명"] = parts[0]
+    if len(parts) >= 2: result["사업자번호"] = parts[1]
+    if len(parts) >= 3: result["신용카드사명"] = parts[2]
+    if len(parts) >= 4: result["신용카드번호"] = parts[3]
+    if len(parts) >= 5: result["직원유무"] = parts[4]
+    if len(parts) >= 6: result["차량유무"] = parts[5]
+    return result
 
 
 def classify_transaction(vendor, industry, rules):
@@ -268,29 +274,53 @@ def process_card_data(vendor, date, total, bizno, upjong, card_company, card_num
 
 def parse_samsung_card(file_bytes, card_company, card_number):
     df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None)
+
+    # 헤더 행 탐색
     header_row = None
     for i in range(min(100, len(df_raw))):
         row_join = " ".join("" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x) for x in df_raw.iloc[i].tolist())
         if ("이용일" in row_join or "승인일자" in row_join) and ("가맹점명" in row_join or "가맹점" in row_join) and "금액" in row_join:
             header_row = i; break
     if header_row is None: header_row = 19
-    df_table = pd.read_excel(io.BytesIO(file_bytes), header=header_row)
-    cols = [str(c).strip() if str(c) != "nan" else f"col{j}" for j, c in enumerate(df_table.iloc[0].tolist())]
-    df = df_table.iloc[1:].copy(); df.columns = cols; df = df.reset_index(drop=True)
+
+    df = pd.read_excel(io.BytesIO(file_bytes), header=header_row)
+    df.columns = [str(c).strip() for c in df.columns]
+
     def pick(cands):
         for c in cands:
             if c in df.columns: return c
         return None
-    col_v = pick(["가맹점명","가맹점","상호"]); col_d = pick(["이용일","승인일자","거래일"])
-    col_t = pick(["이용금액(원)","이용금액","금액"]); col_b = pick(["사업자번호","사업자등록번호"])
-    col_u = pick(["업종","업태"])
+
+    col_v = pick(["가맹점명", "가맹점", "상호"])
+    col_d = pick(["이용일", "승인일자", "거래일"])
+    col_t = pick(["이용금액(원)", "이용금액", "금액"])
+    col_b = pick(["사업자번호", "사업자등록번호"])
+    col_u = pick(["업종", "업태"])
+
+    # 컬럼명 감지 실패 시 위치(index) 기반으로 폴백
+    if col_v is None and len(df.columns) >= 7:
+        df.columns = list(df.columns)
+        # 삼성카드 표준 12컬럼: 상품 매출 성명 카드구분 카드번호 이용일 가맹점명 이용금액(원) 개월수 승인번호 사업자번호 업종
+        col_map = {0:"상품", 1:"매출", 2:"성명", 3:"카드구분", 4:"카드번호",
+                   5:"이용일", 6:"가맹점명", 7:"이용금액(원)", 8:"개월수",
+                   9:"승인번호", 10:"사업자번호", 11:"업종"}
+        df.columns = [col_map.get(i, f"col{i}") for i in range(len(df.columns))]
+        col_v = "가맹점명"; col_d = "이용일"; col_t = "이용금액(원)"
+        col_b = "사업자번호"; col_u = "업종"
+
+    if col_v is None or col_d is None or col_t is None:
+        raise ValueError(f"삼성카드 컬럼 감지 실패. 발견된 컬럼: {list(df.columns)}")
+
     vendor = df[col_v].astype(str).str.replace(r"_x000D_", "", regex=True).str.strip()
     date = pd.to_datetime(df[col_d], errors="coerce")
     total = pd.to_numeric(df[col_t], errors="coerce").fillna(0).astype(int)
     bizno = df[col_b].apply(lambda x: re.sub(r"\D", "", str(x))[:10]) if col_b else pd.Series([""] * len(df))
     upjong = df[col_u].astype(str) if col_u else pd.Series([""] * len(df))
+
     mask = date.notna() & (total != 0)
-    return process_card_data(vendor[mask], date[mask], total[mask], bizno[mask], upjong[mask], card_company, card_number)
+    return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
+                             total[mask].reset_index(drop=True), bizno[mask].reset_index(drop=True),
+                             upjong[mask].reset_index(drop=True), card_company, card_number)
 
 
 def parse_hana_card(file_bytes, card_company, card_number):
@@ -569,7 +599,7 @@ with tab3:
     st.title("💳 카드사 통합 변환기")
     st.caption("카드사 엑셀 파일을 업로드하면 세무사랑 업로드용 파일로 자동 변환합니다.")
 
-    st.info("📌 파일명 형식: **업체명_사업자번호_카드사명_카드번호.xlsx**\n\n예) 홍길동_1234567890_삼성카드_1234-5678-9012-3456.xlsx")
+    st.info("📌 파일명 형식: **상호명_사업자번호_카드사_카드번호_직원유무_차량유무.xlsx**\n\n예) 용은물류_3020895715_삼성카드_5120-2800-0000-5697_직원없음_차량있음.xlsx")
 
     st.subheader("① 카드사 파일 업로드")
     st.caption("삼성카드, 하나카드 지원 / 여러 파일 동시 업로드 가능")
