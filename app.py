@@ -335,6 +335,73 @@ def parse_hana_card(file_bytes, card_company, card_number):
     return process_card_data(vendor[mask], date[mask], total[mask], bizno[mask], upjong[mask], card_company, card_number)
 
 
+def parse_shinhan_card(file_bytes, card_company, card_number):
+    """신한카드 파싱 - header=4, 컬럼 위치 기반"""
+    df = pd.read_excel(io.BytesIO(file_bytes), header=4)
+    if len(df.columns) >= 11:
+        vendor = df.iloc[:, 5].astype(str).str.strip()
+        date = pd.to_datetime(df.iloc[:, 0], errors="coerce")
+        total = pd.to_numeric(df.iloc[:, 6], errors="coerce").fillna(0).astype(int)
+        bizno = df.iloc[:, 10].astype(str).str.replace("-", "").str[:10]
+        upjong = df.iloc[:, 4].astype(str)
+    else:
+        vendor = df['가맹점명'].astype(str).str.strip() if '가맹점명' in df.columns else df.iloc[:, 5].astype(str).str.strip()
+        date = pd.to_datetime(df['거래일자'] if '거래일자' in df.columns else df.iloc[:, 0], errors="coerce")
+        total = pd.to_numeric(df['이용금액'] if '이용금액' in df.columns else df.iloc[:, 6], errors="coerce").fillna(0).astype(int)
+        bizno = (df['사업자등록번호'] if '사업자등록번호' in df.columns else df.iloc[:, 10]).astype(str).str.replace("-", "").str[:10]
+        upjong = (df['상품유형'] if '상품유형' in df.columns else df.iloc[:, 4]).astype(str)
+    mask = date.notna() & (total != 0)
+    return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
+                             total[mask].reset_index(drop=True), bizno[mask].reset_index(drop=True),
+                             upjong[mask].reset_index(drop=True), card_company, card_number)
+
+
+def parse_bc_card(file_bytes, card_company, card_number):
+    """비씨카드 파싱 - 날짜 YYYY/MM/DD 패턴으로 데이터행 식별"""
+    from openpyxl import load_workbook as _load_wb
+    wb = _load_wb(io.BytesIO(file_bytes), data_only=True)
+    ws = wb.worksheets[0]
+    all_rows = list(ws.iter_rows(values_only=True))
+
+    # 헤더행 탐색: 날짜 패턴(YYYY/MM/DD) 있는 행 직전
+    header_idx = 9
+    for i, row in enumerate(all_rows):
+        non_none = [c for c in row if c is not None]
+        if non_none and re.match(r'\d{4}/\d{2}/\d{2}', str(non_none[0])):
+            for j in range(i - 1, -1, -1):
+                if any(c is not None for c in all_rows[j]):
+                    header_idx = j
+                    break
+            break
+
+    vendors, dates, totals, biznos = [], [], [], []
+    for row in all_rows[header_idx + 1:]:
+        date_val = row[2] if len(row) > 2 else None
+        if date_val is None: continue
+        date_str = str(date_val).strip()
+        if not re.match(r'\d{4}/\d{2}/\d{2}', date_str): continue
+        vendor = str(row[9]).strip() if len(row) > 9 and row[9] is not None else ''
+        amount_raw = row[19] if len(row) > 19 else None
+        try:
+            amount = int(str(amount_raw).replace(',', '').strip())
+        except (ValueError, TypeError):
+            amount = 0
+        if amount <= 0: continue
+        bizno_raw = str(row[12]).replace('-', '') if len(row) > 12 and row[12] is not None else ''
+        biznos.append(re.sub(r'\D', '', bizno_raw)[:10])
+        vendors.append(vendor); dates.append(date_str); totals.append(amount)
+
+    if not vendors:
+        return pd.DataFrame(), pd.DataFrame()
+
+    vendor_s = pd.Series(vendors)
+    date_s = pd.to_datetime(pd.Series(dates), format='%Y/%m/%d', errors='coerce')
+    total_s = pd.Series(totals, dtype=int)
+    bizno_s = pd.Series(biznos)
+    upjong_s = pd.Series([""] * len(vendors))
+    return process_card_data(vendor_s, date_s, total_s, bizno_s, upjong_s, card_company, card_number)
+
+
 def fix_html_entities(xlsx_path):
     tmp = tempfile.mkdtemp()
     try:
@@ -602,7 +669,7 @@ with tab3:
     st.info("📌 파일명 형식: **상호명_사업자번호_카드사_카드번호_직원유무_차량유무.xlsx**\n\n예) 용은물류_3020895715_삼성카드_5120-2800-0000-5697_직원없음_차량있음.xlsx")
 
     st.subheader("① 카드사 파일 업로드")
-    st.caption("삼성카드, 하나카드 지원 / 여러 파일 동시 업로드 가능")
+    st.caption("삼성카드, 하나카드, 신한카드, 비씨카드 지원 / 여러 파일 동시 업로드 가능")
     uploaded_cards = st.file_uploader(
         "카드사 엑셀 파일 선택",
         type=["xlsx"],
@@ -628,8 +695,12 @@ with tab3:
                             rows, stats = parse_samsung_card(file_bytes, card_co, card_no)
                         elif "하나" in card_co:
                             rows, stats = parse_hana_card(file_bytes, card_co, card_no)
+                        elif "신한" in card_co:
+                            rows, stats = parse_shinhan_card(file_bytes, card_co, card_no)
+                        elif "비씨" in card_co or "BC" in card_co.upper():
+                            rows, stats = parse_bc_card(file_bytes, card_co, card_no)
                         else:
-                            errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})")
+                            errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})\n지원: 삼성/하나/신한/비씨카드")
                             continue
                         all_rows.append(rows)
                         all_stats.append(stats)
