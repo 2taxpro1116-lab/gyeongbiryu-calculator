@@ -137,6 +137,35 @@ def calc_income_tax(과세표준):
 # ── 페이지 설정 ──────────────────────────────────────
 st.set_page_config(page_title="단순경비율 계산기", page_icon="📊", layout="centered")
 
+# ── 비밀번호 인증 ──────────────────────────────────────
+def check_password():
+    correct_pw = st.secrets.get("APP_PASSWORD") or os.getenv("APP_PASSWORD", "tax1234")
+
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return True
+
+    st.markdown("---")
+    st.markdown("<h2 style='text-align:center'>🔐 경비율 계산기</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:gray'>이용 문의: 이재원 세무사</p>", unsafe_allow_html=True)
+    st.markdown("---")
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        pw = st.text_input("비밀번호를 입력하세요", type="password", placeholder="비밀번호")
+        if st.button("입력", use_container_width=True, type="primary"):
+            if pw == correct_pw:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("비밀번호가 올바르지 않습니다.")
+    return False
+
+if not check_password():
+    st.stop()
+
 # ── 탭 구성 ──────────────────────────────────────────
 tab1, tab2 = st.tabs(["📊 경비율 계산기", "🧾 종합소득세 계산기"])
 
