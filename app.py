@@ -79,7 +79,7 @@ def get_excluded_accounts(중분류):
     return excluded
 
 
-def get_expense_distribution(business_info, accounts, use_purchase):
+def get_expense_distribution(business_info, accounts, use_purchase, 적용경비율=None):
     api_key = st.secrets.get("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
     client = anthropic.Anthropic(api_key=api_key)
 
@@ -91,9 +91,9 @@ def get_expense_distribution(business_info, accounts, use_purchase):
     else:
         all_accounts = account_list
 
-    expense_rate = float(business_info["단순일반율"])
+    expense_rate = 적용경비율 if 적용경비율 is not None else float(business_info["단순일반율"])
 
-    prompt = f"""당신은 세무 전문가입니다. 아래 업종의 단순경비율을 계정과목별로 배분해주세요.
+    prompt = f"""당신은 세무 전문가입니다. 아래 업종의 경비율을 계정과목별로 배분해주세요.
 
 업종 정보:
 - 업종코드: {business_info['업종코드']}
@@ -463,11 +463,14 @@ with tab1:
     st.caption("업종코드와 매출액을 입력하면 Claude AI가 계정과목별 경비를 산정합니다.")
 
     with st.form("calc_form"):
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             업종코드 = st.text_input("업종코드", placeholder="예) 552101")
         with col2:
             매출액_input = st.text_input("매출액 (원)", placeholder="예) 150,000,000")
+        with col3:
+            경비율_input = st.text_input("경비율 (%)", placeholder="미입력 시 단순경비율 자동적용",
+                                         help="직접 입력하면 해당 경비율로 계정과목 배분. 비워두면 단순경비율 자동 사용.")
 
         submitted = st.form_submit_button("계산하기", use_container_width=True, type="primary")
 
@@ -481,6 +484,18 @@ with tab1:
                 st.error("매출액은 숫자로 입력해주세요.")
                 st.stop()
 
+            # 경비율 처리 (입력 없으면 None → 단순경비율 사용)
+            커스텀경비율 = None
+            if 경비율_input.strip():
+                try:
+                    커스텀경비율 = float(경비율_input.replace("%", "").strip())
+                    if not (0 < 커스텀경비율 <= 100):
+                        st.error("경비율은 0~100 사이 값을 입력해주세요.")
+                        st.stop()
+                except ValueError:
+                    st.error("경비율은 숫자로 입력해주세요. 예) 64.1")
+                    st.stop()
+
             df = load_data()
             accounts = load_accounts()
             business = find_business(df, 업종코드.strip())
@@ -490,19 +505,22 @@ with tab1:
                 st.stop()
 
             use_purchase = has_product_purchase(business["중분류"])
+            적용경비율 = 커스텀경비율 if 커스텀경비율 else float(business["단순일반율"])
 
             st.divider()
             st.subheader("📌 업종 정보")
             c1, c2, c3 = st.columns(3)
             c1.metric("업종명", business["세세분류"])
             c2.metric("단순경비율(일반)", f"{business['단순일반율']}%")
-            c3.metric("상품매입 계정", "사용" if use_purchase else "미사용")
+            c3.metric("적용 경비율", f"{적용경비율}%",
+                      delta="직접 입력" if 커스텀경비율 else "단순경비율 자동적용",
+                      delta_color="normal" if 커스텀경비율 else "off")
             st.caption(f"중분류: {business['중분류']} / 소분류: {business['소분류']} / 세분류: {business['세분류']}")
 
             st.divider()
             with st.spinner("Claude AI가 계정과목별 비율을 산정하고 있습니다..."):
                 try:
-                    distribution = get_expense_distribution(business, accounts, use_purchase)
+                    distribution = get_expense_distribution(business, accounts, use_purchase, 적용경비율)
                 except Exception as e:
                     st.error(f"API 오류: {e}")
                     st.stop()
