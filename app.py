@@ -326,6 +326,67 @@ def parse_samsung_card(file_bytes, card_company, card_number):
 
 
 def parse_hana_card(file_bytes, card_company, card_number):
+    """하나카드 파싱 - 구형(매출일자/사용금액)과 신형(승인일자/승인금액) 자동 감지"""
+    df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+
+    # 신형 형식: '승인일자' + '가맹점명' + '승인금액' 헤더가 있는 경우
+    # 데이터가 날짜 패턴(YYYY-MM-DD)으로 시작하는 행만 추출
+    HEADER_MARKER = {"승인일자", "가맹점명", "승인금액"}
+    is_new_format = False
+    for _, row in df_raw.iterrows():
+        vals = set(str(v).strip() for v in row if pd.notna(v) and str(v).strip() not in ["", "nan"])
+        if HEADER_MARKER.issubset(vals):
+            is_new_format = True
+            break
+
+    if is_new_format:
+        # 헤더 행에서 컬럼 위치(인덱스) 동적 추출
+        col_idx = {}
+        for _, row in df_raw.iterrows():
+            vals_raw = [str(v).strip() if pd.notna(v) else "" for v in row]
+            if "승인일자" in vals_raw and "가맹점명" in vals_raw:
+                for ci, v in enumerate(vals_raw):
+                    col_idx[v] = ci
+                break
+        ci_date   = col_idx.get("승인일자", 0)
+        ci_vendor = col_idx.get("가맹점명", 6)
+        ci_bizno  = col_idx.get("사업자번호", 9)
+        ci_amount = col_idx.get("승인금액", 15)
+        ci_cancel = col_idx.get("취소여부", 16)
+
+        # 날짜 패턴 행만 수집, 취소 행 제외
+        DATE_PAT = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+        vendors, dates, totals, biznos, upjongnums = [], [], [], [], []
+        for _, row in df_raw.iterrows():
+            vals = [str(v).strip() if pd.notna(v) else "" for v in row]
+            if not DATE_PAT.match(vals[ci_date] if ci_date < len(vals) else ""):
+                continue
+            if ci_cancel < len(vals) and vals[ci_cancel] == "취소":
+                continue
+            try:
+                amount = int(str(vals[ci_amount] if ci_amount < len(vals) else "0").replace(",", ""))
+            except ValueError:
+                continue
+            if amount <= 0:
+                continue
+            dates.append(vals[ci_date])
+            vendors.append(vals[ci_vendor] if ci_vendor < len(vals) else "")
+            biznos.append(re.sub(r"\D", "", vals[ci_bizno] if ci_bizno < len(vals) else "")[:10])
+            totals.append(amount)
+            upjongnums.append("")
+        if not vendors:
+            return pd.DataFrame(), pd.DataFrame()
+        date_s  = pd.to_datetime(pd.Series(dates), errors="coerce")
+        vendor_s = pd.Series(vendors)
+        total_s  = pd.Series(totals, dtype=int)
+        bizno_s  = pd.Series(biznos)
+        upjong_s = pd.Series(upjongnums)
+        mask = date_s.notna() & (total_s != 0)
+        return process_card_data(vendor_s[mask].reset_index(drop=True), date_s[mask].reset_index(drop=True),
+                                 total_s[mask].reset_index(drop=True), bizno_s[mask].reset_index(drop=True),
+                                 upjong_s[mask].reset_index(drop=True), card_company, card_number)
+
+    # 구형 형식: header=12, 매출일자/원화사용금액 컬럼
     df = pd.read_excel(io.BytesIO(file_bytes), header=12)
     df = df[df['취소일자'].isna() | (df['취소일자'] == '취소일자')]
     vendor = df['가맹점명'].astype(str).str.strip()
