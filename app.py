@@ -846,8 +846,10 @@ with tab3:
             if errors:
                 for e in errors: st.error(e)
 
-            non_empty_rows  = [r for r in all_rows  if not r.empty]
-            non_empty_stats = [s for s in all_stats if not s.empty]
+            non_empty_rows  = [r for r in all_rows  if isinstance(r, pd.DataFrame) and not r.empty]
+            non_empty_stats = [s for s in all_stats if isinstance(s, pd.DataFrame) and not s.empty]
+            if not non_empty_rows and not errors:
+                st.warning("⚠️ 변환할 거래 내역이 없습니다. 파일 형식을 확인해주세요.")
             if non_empty_rows:
                 combined = pd.concat(non_empty_rows, ignore_index=True)
                 stats_df = pd.concat(non_empty_stats, ignore_index=True)
