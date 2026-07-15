@@ -338,23 +338,21 @@ def parse_hana_card(file_bytes, card_company, card_number):
 
 
 def parse_shinhan_card(file_bytes, card_company, card_number):
-    """신한카드 파싱 - pandas로 헤더 행 자동 탐색, 컬럼명 기반 추출"""
-    HEADER_KEYWORDS = ["이용일", "거래일", "가맹점명", "이용금액", "거래금액", "매출금액"]
+    """신한카드 파싱 - 셀 값 기반 헤더 행 자동 탐색, 컬럼명 기반 추출"""
+    HEADER_KEYWORDS = ["가맹점명", "매출금액", "이용금액", "거래금액", "이용일", "거래일"]
 
-    # 헤더 행 탐색: header=0~20 중 키워드 포함 행 찾기
-    header_idx = None
-    for h in range(20):
-        try:
-            df_tmp = pd.read_excel(io.BytesIO(file_bytes), header=h, nrows=0)
-            cols_str = " ".join(str(c) for c in df_tmp.columns)
-            if any(k in cols_str for k in HEADER_KEYWORDS):
-                header_idx = h
+    # header=None 으로 전체 읽어서 셀 값에 키워드가 2개 이상인 행을 헤더로 감지
+    header_idx = 4  # 기본값
+    try:
+        df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+        for i, row in df_raw.iterrows():
+            vals = " ".join(str(v) for v in row if pd.notna(v))
+            matched = sum(1 for k in HEADER_KEYWORDS if k in vals)
+            if matched >= 2:
+                header_idx = i
                 break
-        except Exception:
-            continue
-
-    if header_idx is None:
-        header_idx = 4  # 기본값 폴백
+    except Exception:
+        pass
 
     df = pd.read_excel(io.BytesIO(file_bytes), header=header_idx)
     cols = [str(c).strip() for c in df.columns]
