@@ -450,6 +450,30 @@ def parse_shinhan_card(file_bytes, card_company, card_number):
                              upjong[mask].reset_index(drop=True), card_company, card_number)
 
 
+def parse_kb_card(file_bytes, card_company, card_number):
+    """국민카드 파싱 - 이용일/매출금액/가맹점명/사업자번호, 취소여부 필터"""
+    df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+    header_idx = 13
+    for i, row in df_raw.iterrows():
+        vals = [str(v).strip() for v in row if pd.notna(v) and str(v).strip() not in ['', 'nan']]
+        if '이용일' in vals and '가맹점명' in vals and '매출금액' in vals:
+            header_idx = i
+            break
+    df = pd.read_excel(io.BytesIO(file_bytes), header=header_idx)
+    df.columns = [str(c).strip() for c in df.columns]
+    if '취소여부' in df.columns:
+        df = df[df['취소여부'] == '정상'].reset_index(drop=True)
+    date   = pd.to_datetime(df['이용일'], errors='coerce')
+    vendor = df['가맹점명'].astype(str).str.strip()
+    total  = pd.to_numeric(df['매출금액'], errors='coerce').fillna(0).astype(int)
+    bizno  = df['사업자번호'].astype(str).str.replace('-', '').str[:10] if '사업자번호' in df.columns else pd.Series([''] * len(df))
+    upjong = pd.Series([''] * len(df))
+    mask = date.notna() & (total > 0)
+    return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
+                             total[mask].reset_index(drop=True), bizno[mask].reset_index(drop=True),
+                             upjong[mask].reset_index(drop=True), card_company, card_number)
+
+
 def parse_hyundai_card(file_bytes, card_company, card_number):
     """현대카드 파싱 - 이용일/가맹점명/이용 금액/사업자등록번호, 날짜 YYYY.MM.DD"""
     df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
@@ -850,7 +874,7 @@ with tab3:
     st.info("📌 파일명 형식: **상호명_사업자번호_카드사_카드번호_직원유무_차량유무.xlsx**\n\n예) 용은물류_3020895715_삼성카드_5120-2800-0000-5697_직원없음_차량있음.xlsx")
 
     st.subheader("① 카드사 파일 업로드")
-    st.caption("삼성카드, 하나카드, 신한카드, 비씨카드, NH농협카드, 현대카드 지원 / 여러 파일 동시 업로드 가능")
+    st.caption("삼성카드, 하나카드, 신한카드, 비씨카드, NH농협카드, 현대카드, 국민카드 지원 / 여러 파일 동시 업로드 가능")
     uploaded_cards = st.file_uploader(
         "카드사 엑셀 파일 선택",
         type=["xlsx"],
@@ -884,8 +908,10 @@ with tab3:
                             rows, stats = parse_nh_card(file_bytes, card_co, card_no)
                         elif "현대" in card_co:
                             rows, stats = parse_hyundai_card(file_bytes, card_co, card_no)
+                        elif "국민" in card_co or "KB" in card_co.upper():
+                            rows, stats = parse_kb_card(file_bytes, card_co, card_no)
                         else:
-                            errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})\n지원: 삼성/하나/신한/비씨/NH농협/현대카드")
+                            errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})\n지원: 삼성/하나/신한/비씨/NH농협/현대/국민카드")
                             continue
                         all_rows.append(rows)
                         all_stats.append(stats)
