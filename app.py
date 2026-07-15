@@ -338,20 +338,51 @@ def parse_hana_card(file_bytes, card_company, card_number):
 
 
 def parse_shinhan_card(file_bytes, card_company, card_number):
-    """신한카드 파싱 - header=4, 컬럼 위치 기반"""
-    df = pd.read_excel(io.BytesIO(file_bytes), header=4)
-    if len(df.columns) >= 11:
-        vendor = df.iloc[:, 5].astype(str).str.strip()
-        date = pd.to_datetime(df.iloc[:, 0], errors="coerce")
-        total = pd.to_numeric(df.iloc[:, 6], errors="coerce").fillna(0).astype(int)
-        bizno = df.iloc[:, 10].astype(str).str.replace("-", "").str[:10]
-        upjong = df.iloc[:, 4].astype(str)
-    else:
-        vendor = df['가맹점명'].astype(str).str.strip() if '가맹점명' in df.columns else df.iloc[:, 5].astype(str).str.strip()
-        date = pd.to_datetime(df['거래일자'] if '거래일자' in df.columns else df.iloc[:, 0], errors="coerce")
-        total = pd.to_numeric(df['이용금액'] if '이용금액' in df.columns else df.iloc[:, 6], errors="coerce").fillna(0).astype(int)
-        bizno = (df['사업자등록번호'] if '사업자등록번호' in df.columns else df.iloc[:, 10]).astype(str).str.replace("-", "").str[:10]
-        upjong = (df['상품유형'] if '상품유형' in df.columns else df.iloc[:, 4]).astype(str)
+    """신한카드 파싱 - 헤더 행 자동 감지 후 컬럼명 우선, 위치 기반 폴백"""
+    from openpyxl import load_workbook as _load_wb
+    wb = _load_wb(io.BytesIO(file_bytes), data_only=True)
+    ws = wb.worksheets[0]
+    all_rows = list(ws.iter_rows(values_only=True))
+
+    # 헤더 행 탐색: 이용일/거래일 등 날짜 키워드 포함 행
+    header_idx = 4
+    for i, row in enumerate(all_rows):
+        row_str = " ".join(str(c) for c in row if c is not None)
+        if any(k in row_str for k in ["이용일", "거래일", "가맹점명", "이용금액", "거래금액"]):
+            header_idx = i
+            break
+
+    # 헤더 행으로 DataFrame 생성
+    df = pd.read_excel(io.BytesIO(file_bytes), header=header_idx)
+    cols = [str(c).strip() for c in df.columns]
+
+    def find_col(candidates):
+        for c in candidates:
+            for i, col in enumerate(cols):
+                if c in col:
+                    return i
+        return None
+
+    date_idx   = find_col(["이용일", "거래일"])
+    vendor_idx = find_col(["가맹점명", "가맹점"])
+    amount_idx = find_col(["이용금액", "거래금액", "승인금액"])
+    bizno_idx  = find_col(["사업자등록번호", "사업자번호"])
+    upjong_idx = find_col(["상품유형", "업종"])
+
+    ncols = len(df.columns)
+
+    def safe_col(idx, default_idx):
+        i = idx if idx is not None else default_idx
+        if i is not None and i < ncols:
+            return df.iloc[:, i]
+        return pd.Series([""] * len(df))
+
+    date   = pd.to_datetime(safe_col(date_idx, 0), errors="coerce")
+    vendor = safe_col(vendor_idx, 5).astype(str).str.strip()
+    total  = pd.to_numeric(safe_col(amount_idx, 6), errors="coerce").fillna(0).astype(int)
+    bizno  = safe_col(bizno_idx, 10).astype(str).str.replace("-", "").str[:10]
+    upjong = safe_col(upjong_idx, 4).astype(str)
+
     mask = date.notna() & (total != 0)
     return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
                              total[mask].reset_index(drop=True), bizno[mask].reset_index(drop=True),
