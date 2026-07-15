@@ -608,6 +608,59 @@ def fix_html_entities(xlsx_path):
         shutil.rmtree(tmp)
 
 
+def classify_unclassified_with_claude(vendor_names):
+    """미분류 가맹점명을 Claude API로 일괄 분류 → {가맹점명: 계정과목명} 반환"""
+    api_key = st.secrets.get("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+    client = anthropic.Anthropic(api_key=api_key)
+
+    unique_vendors = list(dict.fromkeys(vendor_names))  # 순서 유지 중복 제거
+    if not unique_vendors:
+        return {}
+
+    valid_accounts = [name for name in ACCOUNT_CODE_MAP if name != "미분류"]
+    account_list_str = "\n".join(f"- {name}" for name in valid_accounts)
+
+    prompt = f"""다음 신용카드 가맹점명을 아래 계정과목 중 가장 적합한 것으로 분류하세요.
+업무용 법인카드/사업용 카드 이용 내역이며, 경비 처리 목적입니다.
+
+[계정과목 목록]
+{account_list_str}
+
+[분류 기준]
+- 식당, 음식점, 카페, 커피, 주점, 치킨, 피자, 횟집 → 접대비
+- 편의점(GS25, CU, 세븐일레븐, 이마트24), 마트, 슈퍼, 약국, 병원 → 복리후생비
+- 주유소, 충전소, 정비소, 세차, 주차장, 하이패스 → 차량유지비
+- KT, SKT, LG유플러스, SK브로드밴드, 인터넷 → 통신비
+- 항공(대한항공, 아시아나, 제주항공), 기차(KTX, 코레일), 버스, 택시, 숙박(호텔, 모텔, 여관) → 여비교통비
+- 보험사(삼성생명, 한화생명, 흥국화재 등) → 보험료
+- 학원, 교육기관, 훈련센터 → 교육훈련비
+- 도서, 신문, 문구점, 사무용품 → 도서인쇄비 또는 사무용품비
+- 임대업체, 월세, 건물 관리 → 임차료
+- 분류 어려운 경우 → 소모품비
+
+[가맹점명 목록 (JSON 배열)]
+{json.dumps(unique_vendors, ensure_ascii=False)}
+
+JSON 형식으로만 응답하세요 (설명 없이, 코드블록 없이):
+{{"가맹점명": "계정과목명", ...}}"""
+
+    msg = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    text = msg.content[0].text.strip()
+    # 코드블록 제거
+    if "```" in text:
+        parts = text.split("```")
+        text = parts[1] if len(parts) > 1 else parts[0]
+        if text.startswith("json"):
+            text = text[4:]
+    result = json.loads(text.strip())
+    # 유효한 계정과목만 유지
+    return {k: v for k, v in result.items() if v in ACCOUNT_CODE_MAP and v != "미분류"}
+
+
 def write_to_template(rows_df, company_name, business_number):
     tmp_path = tempfile.mktemp(suffix=".xlsx")
     shutil.copy2(TEMPLATE_PATH, tmp_path)
@@ -929,6 +982,29 @@ with tab3:
                 combined = pd.concat(non_empty_rows, ignore_index=True)
                 stats_df = pd.concat(non_empty_stats, ignore_index=True)
 
+                # ── AI 자동 분류 (미분류 항목) ──
+                ai_classified_cnt = 0
+                unclassified_mask = stats_df['계정과목'] == '미분류'
+                if unclassified_mask.any():
+                    with st.spinner("🤖 미분류 항목 AI 분류 중..."):
+                        try:
+                            unc_vendors = stats_df.loc[unclassified_mask, '가맹점명'].tolist()
+                            ai_map = classify_unclassified_with_claude(unc_vendors)
+                            if ai_map:
+                                for idx in stats_df[unclassified_mask].index:
+                                    vendor = stats_df.loc[idx, '가맹점명']
+                                    new_acc = ai_map.get(vendor)
+                                    if new_acc and new_acc in ACCOUNT_CODE_MAP:
+                                        stats_df.loc[idx, '계정과목'] = new_acc
+                                        stats_df.loc[idx, '분류방법'] = 'AI'
+                                        combined.loc[idx, '계정과목'] = ACCOUNT_CODE_MAP[new_acc]
+                                        vat = "불공제" if new_acc == "접대비" else "공제"
+                                        combined.loc[idx, '부가세공제여부'] = vat
+                                        combined.loc[idx, '부가세유형'] = 57 if vat == "공제" else ""
+                                        ai_classified_cnt += 1
+                        except Exception as ai_err:
+                            st.warning(f"⚠️ AI 분류 중 오류 발생: {ai_err}")
+
                 total_cnt = len(combined)
                 classified = len(stats_df[stats_df['계정과목'] != '미분류']) if '계정과목' in stats_df.columns else 0
                 unclassified = total_cnt - classified
@@ -936,10 +1012,11 @@ with tab3:
 
                 st.divider()
                 st.subheader("📊 변환 결과")
-                c1, c2, c3 = st.columns(3)
+                c1, c2, c3, c4 = st.columns(4)
                 c1.metric("총 거래건수", f"{total_cnt:,}건")
-                c2.metric("자동 분류", f"{classified:,}건", f"{classified/total_cnt*100:.1f}%")
-                c3.metric("미분류", f"{unclassified:,}건", delta_color="inverse")
+                c2.metric("키워드 분류", f"{classified - ai_classified_cnt:,}건")
+                c3.metric("🤖 AI 분류", f"{ai_classified_cnt:,}건")
+                c4.metric("미분류", f"{unclassified:,}건", delta_color="inverse")
 
                 amt_col = st.columns(3)
                 amt_col[0].metric("공급가액 합계", f"{combined['공급가액'].sum():,.0f}원")
@@ -955,7 +1032,9 @@ with tab3:
                 st.dataframe(summary, use_container_width=True, hide_index=True)
 
                 if unclassified > 0:
-                    st.warning(f"⚠️ 미분류 {unclassified}건은 리포트 파일에서 확인 후 수동 수정하세요.")
+                    st.warning(f"⚠️ 미분류 {unclassified}건 — 리포트 파일에서 확인 후 수동 수정하세요.")
+                elif ai_classified_cnt > 0:
+                    st.success(f"✅ AI가 미분류 {ai_classified_cnt}건을 자동 분류했습니다. 리포트에서 검토를 권장합니다.")
 
                 st.divider()
                 st.subheader("⬇️ 파일 다운로드")
