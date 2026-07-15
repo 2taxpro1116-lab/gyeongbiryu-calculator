@@ -454,27 +454,24 @@ def parse_bc_card(file_bytes, card_company, card_number):
     """비씨카드 파싱 - 신형(매출일자/가맹점명 header=0)과 구형(YYYY/MM/DD 패턴) 자동 감지"""
 
     # ── 신형 형식 감지: 첫 행이 '매출일자' + '가맹점명' + '매출금액' 포함 ──
-    try:
-        df_check = pd.read_excel(io.BytesIO(file_bytes), header=0, nrows=0)
-        cols0 = set(str(c).strip() for c in df_check.columns)
-        if {"매출일자", "가맹점명", "매출금액"}.issubset(cols0):
-            df = pd.read_excel(io.BytesIO(file_bytes), header=0)
-            df.columns = [str(c).strip() for c in df.columns]
-            # 소계/합계 행 제외: 고객사명 없는 행
-            if "고객사명" in df.columns:
-                df = df[df["고객사명"].notna()]
-            date   = pd.to_datetime(df["매출일자"], errors="coerce")
-            vendor = df["가맹점명"].astype(str).str.strip()
-            total  = pd.to_numeric(df["매출금액"], errors="coerce").fillna(0).astype(int)
-            bizno_col = "사업자등록번호" if "사업자등록번호" in df.columns else None
-            bizno  = df[bizno_col].astype(str).str.replace("-", "").str[:10] if bizno_col else pd.Series([""] * len(df))
-            upjong = pd.Series([""] * len(df))
-            mask = date.notna() & (total > 0)
-            return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
-                                     total[mask].reset_index(drop=True), bizno[mask].reset_index(drop=True),
-                                     upjong[mask].reset_index(drop=True), card_company, card_number)
-    except Exception:
-        pass
+    df_check = pd.read_excel(io.BytesIO(file_bytes), header=0, nrows=0)
+    cols0 = set(str(c).strip() for c in df_check.columns)
+    if {"매출일자", "가맹점명", "매출금액"}.issubset(cols0):
+        df = pd.read_excel(io.BytesIO(file_bytes), header=0)
+        df.columns = [str(c).strip() for c in df.columns]
+        # 소계/합계 행 제외: 고객사명 없는 행
+        if "고객사명" in df.columns:
+            df = df[df["고객사명"].notna()].reset_index(drop=True)
+        date   = pd.to_datetime(df["매출일자"], errors="coerce")
+        vendor = df["가맹점명"].astype(str).str.strip()
+        total  = pd.to_numeric(df["매출금액"], errors="coerce").fillna(0).astype(int)
+        bizno_col = "사업자등록번호" if "사업자등록번호" in df.columns else None
+        bizno  = df[bizno_col].astype(str).str.replace("-", "").str[:10] if bizno_col else pd.Series([""] * len(df))
+        upjong = pd.Series([""] * len(df))
+        mask = date.notna() & (total > 0)
+        return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
+                                 total[mask].reset_index(drop=True), bizno[mask].reset_index(drop=True),
+                                 upjong[mask].reset_index(drop=True), card_company, card_number)
 
     # ── 구형 형식: YYYY/MM/DD 날짜 패턴으로 데이터행 식별 (openpyxl) ──
     from openpyxl import load_workbook as _load_wb
