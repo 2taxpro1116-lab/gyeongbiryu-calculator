@@ -223,15 +223,23 @@ DEFAULT_RULES = {
 
 def parse_filename_card(filename):
     # 형식: 상호명_사업자번호_카드사_카드번호_직원유무_차량유무.xlsx
+    # 카드사 생략 형식: 상호명_사업자번호_카드번호_직원유무_차량유무.xlsx
     base = os.path.splitext(filename)[0]
     parts = base.split("_")
     result = {"업체명": "", "사업자번호": "", "신용카드사명": "", "신용카드번호": "", "직원유무": "", "차량유무": ""}
     if len(parts) >= 1: result["업체명"] = parts[0]
     if len(parts) >= 2: result["사업자번호"] = parts[1]
-    if len(parts) >= 3: result["신용카드사명"] = parts[2]
-    if len(parts) >= 4: result["신용카드번호"] = parts[3]
-    if len(parts) >= 5: result["직원유무"] = parts[4]
-    if len(parts) >= 6: result["차량유무"] = parts[5]
+    if len(parts) >= 3:
+        # parts[2]가 카드번호 패턴(숫자4개-...)이면 카드사 생략으로 판단
+        if parts[2].count("-") >= 3 and any(c.isdigit() for c in parts[2]):
+            result["신용카드번호"] = parts[2]
+            if len(parts) >= 4: result["직원유무"] = parts[3]
+            if len(parts) >= 5: result["차량유무"] = parts[4]
+        else:
+            result["신용카드사명"] = parts[2]
+            if len(parts) >= 4: result["신용카드번호"] = parts[3]
+            if len(parts) >= 5: result["직원유무"] = parts[4]
+            if len(parts) >= 6: result["차량유무"] = parts[5]
     return result
 
 
@@ -469,6 +477,29 @@ def parse_kb_card(file_bytes, card_company, card_number):
     bizno  = df['사업자번호'].astype(str).str.replace('-', '').str[:10] if '사업자번호' in df.columns else pd.Series([''] * len(df))
     upjong = pd.Series([''] * len(df))
     mask = date.notna() & (total > 0)
+    return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
+                             total[mask].reset_index(drop=True), bizno[mask].reset_index(drop=True),
+                             upjong[mask].reset_index(drop=True), card_company, card_number)
+
+
+def parse_ibk_bc_card(file_bytes, card_company, card_number):
+    """IBK기업은행 BC카드 파싱 - 접수일자/가맹점명/이용금액/가맹점사업자번호, 헤더행 동적 감지"""
+    df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+    header_idx = 8
+    for i, row in df_raw.iterrows():
+        vals = [str(v).strip() for v in row if pd.notna(v) and str(v).strip() not in ['', 'nan']]
+        if '접수일자' in vals and '가맹점명' in vals and '이용금액' in vals:
+            header_idx = i
+            break
+    df = pd.read_excel(io.BytesIO(file_bytes), header=header_idx)
+    df.columns = [str(c).strip() for c in df.columns]
+    date_col = '접수일자' if '접수일자' in df.columns else '매출일자'
+    date   = pd.to_datetime(df[date_col].astype(str), format='%Y%m%d', errors='coerce')
+    vendor = df['가맹점명'].astype(str).str.strip()
+    total  = pd.to_numeric(df['이용금액'], errors='coerce').fillna(0).astype(int)
+    bizno  = df['가맹점사업자번호'].astype(str).str.replace('-', '').str[:10] if '가맹점사업자번호' in df.columns else pd.Series([''] * len(df))
+    upjong = pd.Series([''] * len(df))
+    mask = date.notna() & (total > 0)  # 음수(취소) 제외
     return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
                              total[mask].reset_index(drop=True), bizno[mask].reset_index(drop=True),
                              upjong[mask].reset_index(drop=True), card_company, card_number)
@@ -924,7 +955,7 @@ with tab3:
     st.title("💳 카드사 통합 변환기")
     st.caption("카드사 엑셀 파일을 업로드하면 세무사랑 업로드용 파일로 자동 변환합니다.")
 
-    st.info("📌 파일명 형식: **상호명_사업자번호_카드사_카드번호_직원유무_차량유무.xlsx**\n\n예) 용은물류_3020895715_삼성카드_5120-2800-0000-5697_직원없음_차량있음.xlsx")
+    st.info("📌 파일명 형식: **상호명_사업자번호_카드사_카드번호_직원유무_차량유무.xlsx**\n\n예) 용은물류_3020895715_삼성카드_5120-2800-0000-5697_직원없음_차량있음.xlsx\n\n※ IBK기업BC카드는 카드사 생략 가능: 건강SM녹즙_8524501167_9430-0326-9529-1967_직원없음_차량없음.xlsx")
 
     st.subheader("① 카드사 파일 업로드")
     st.caption("삼성카드, 하나카드, 신한카드, 비씨카드, NH농협카드, 현대카드, 국민카드 지원 / 여러 파일 동시 업로드 가능")
@@ -963,9 +994,23 @@ with tab3:
                             rows, stats = parse_hyundai_card(file_bytes, card_co, card_no)
                         elif "국민" in card_co or "KB" in card_co.upper():
                             rows, stats = parse_kb_card(file_bytes, card_co, card_no)
+                        elif "기업" in card_co or "IBK" in card_co.upper():
+                            rows, stats = parse_ibk_bc_card(file_bytes, card_co, card_no)
                         else:
-                            errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})\n지원: 삼성/하나/신한/비씨/NH농협/현대/국민카드")
-                            continue
+                            # 카드사 미입력 시 파일 내용으로 자동 감지
+                            try:
+                                df_auto = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+                                for _i, _row in df_auto.iterrows():
+                                    _vals = [str(v).strip() for v in _row if pd.notna(v) and str(v).strip() not in ['', 'nan']]
+                                    if '접수일자' in _vals and '가맹점명' in _vals and '이용금액' in _vals:
+                                        rows, stats = parse_ibk_bc_card(file_bytes, "IBK기업BC카드", card_no)
+                                        break
+                                else:
+                                    errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})\n지원: 삼성/하나/신한/비씨/NH농협/현대/국민/IBK기업BC카드")
+                                    continue
+                            except Exception:
+                                errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})\n지원: 삼성/하나/신한/비씨/NH농협/현대/국민/IBK기업BC카드")
+                                continue
                         all_rows.append(rows)
                         all_stats.append(stats)
                     except Exception as e:
