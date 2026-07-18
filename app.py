@@ -554,7 +554,14 @@ def parse_nh_card(file_bytes, card_company, card_number):
 
 
 def parse_bc_card(file_bytes, card_company, card_number):
-    """비씨카드 파싱 - 신형(매출일자/가맹점명 header=0)과 구형(YYYY/MM/DD 패턴) 자동 감지"""
+    """비씨카드 파싱 - IBK기업은행형/신형(header=0)/구형 자동 감지"""
+
+    # ── IBK기업은행 형식 감지: '접수일자' + '가맹점명' + '이용금액' ──
+    df_raw_check = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+    for _i, _row in df_raw_check.iterrows():
+        _vals = [str(v).strip() for v in _row if pd.notna(v) and str(v).strip() not in ['', 'nan']]
+        if '접수일자' in _vals and '가맹점명' in _vals and '이용금액' in _vals:
+            return parse_ibk_bc_card(file_bytes, card_company, card_number)
 
     # ── 신형 형식 감지: 첫 행이 '매출일자' + '가맹점명' + '매출금액' 포함 ──
     df_check = pd.read_excel(io.BytesIO(file_bytes), header=0, nrows=0)
