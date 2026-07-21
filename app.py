@@ -350,7 +350,24 @@ def parse_samsung_card(file_bytes, card_company, card_number):
 
 
 def parse_hana_card(file_bytes, card_company, card_number):
-    """하나카드 파싱 - 구형(매출일자/사용금액)과 신형(승인일자/승인금액) 자동 감지"""
+    """하나카드 파싱 - 접수일자/원화사용금액 형식, 승인일자/승인금액 형식, 구형 자동 감지"""
+
+    # ── 종합소득세 형식: header=0, 접수일자/가맹점명/원화사용금액 ──
+    df_h0 = pd.read_excel(io.BytesIO(file_bytes), header=0, nrows=0)
+    cols_h0 = set(str(c).strip() for c in df_h0.columns)
+    if {'접수일자', '가맹점명', '원화사용금액'}.issubset(cols_h0):
+        df = pd.read_excel(io.BytesIO(file_bytes), header=0)
+        df.columns = [str(c).strip() for c in df.columns]
+        date   = pd.to_datetime(df['접수일자'], errors='coerce')
+        vendor = df['가맹점명'].astype(str).str.strip()
+        total  = pd.to_numeric(df['원화사용금액'].astype(str).str.replace(',', '', regex=False), errors='coerce').fillna(0).astype(int)
+        bizno  = df['가맹점사업자번호'].astype(str).str.replace('-', '').str[:10] if '가맹점사업자번호' in df.columns else pd.Series([''] * len(df))
+        upjong = df['업종명'].astype(str) if '업종명' in df.columns else pd.Series([''] * len(df))
+        mask = date.notna() & (total > 0)
+        return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
+                                 total[mask].reset_index(drop=True), bizno[mask].reset_index(drop=True),
+                                 upjong[mask].reset_index(drop=True), card_company, card_number)
+
     df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
 
     # 신형 형식: '승인일자' + '가맹점명' + '승인금액' 헤더가 있는 경우
