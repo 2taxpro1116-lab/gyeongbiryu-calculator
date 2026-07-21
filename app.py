@@ -520,6 +520,24 @@ def parse_kb_card(file_bytes, card_company, card_number):
                              upjong[mask].reset_index(drop=True), card_company, card_number)
 
 
+def parse_woori_card(file_bytes, card_company, card_number):
+    """우리카드 파싱 - 매출일자/가맹점명/매출금액/사업자등록번호, 고객사명='우리카드'로 월소계·합계 제외"""
+    df = pd.read_excel(io.BytesIO(file_bytes), header=0, dtype=str)
+    df.columns = [str(c).strip() for c in df.columns]
+    # 월소계·합계 행 제거: 고객사명이 '우리카드'인 행만 사용
+    if '고객사명' in df.columns:
+        df = df[df['고객사명'] == '우리카드'].reset_index(drop=True)
+    date   = pd.to_datetime(df['매출일자'], errors='coerce')
+    vendor = df['가맹점명'].astype(str).str.strip()
+    total  = pd.to_numeric(df['매출금액'], errors='coerce').fillna(0).astype(int)
+    bizno  = df['사업자등록번호'].astype(str).str.replace('-', '').str[:10] if '사업자등록번호' in df.columns else pd.Series([''] * len(df))
+    upjong = pd.Series([''] * len(df))
+    mask = date.notna() & (total > 0)  # 음수(취소) 제외
+    return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
+                             total[mask].reset_index(drop=True), bizno[mask].reset_index(drop=True),
+                             upjong[mask].reset_index(drop=True), card_company, card_number)
+
+
 def parse_lotte_card(file_bytes, card_company, card_number):
     """롯데카드 파싱 - 매출일자/가맹점명/매출금액/사업자번호, 음수(취소)·합계행 제외"""
     df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
@@ -1060,7 +1078,7 @@ with tab3:
     st.info("📌 파일명 형식: **상호명_사업자번호_카드사_카드번호_직원유무_차량유무.xlsx**\n\n예) 용은물류_3020895715_삼성카드_5120-2800-0000-5697_직원없음_차량있음.xlsx")
 
     st.subheader("① 카드사 파일 업로드")
-    st.caption("삼성/하나/신한/비씨/NH농협/현대/국민/IBK기업BC/카카오뱅크/롯데카드 지원 / 여러 파일 동시 업로드 가능")
+    st.caption("삼성/하나/신한/비씨/NH농협/현대/국민/IBK기업BC/카카오뱅크/롯데/우리카드 지원 / 여러 파일 동시 업로드 가능")
     uploaded_cards = st.file_uploader(
         "카드사 엑셀 파일 선택",
         type=["xlsx"],
@@ -1102,6 +1120,8 @@ with tab3:
                             rows, stats = parse_kakao_card(file_bytes, card_co or "카카오뱅크", card_no)
                         elif "롯데" in card_co or "롯데" in uf.name:
                             rows, stats = parse_lotte_card(file_bytes, card_co or "롯데카드", card_no)
+                        elif "우리" in card_co or "우리" in uf.name:
+                            rows, stats = parse_woori_card(file_bytes, card_co or "우리카드", card_no)
                         else:
                             # 카드사 미입력 시 파일 내용으로 자동 감지
                             try:
@@ -1121,11 +1141,15 @@ with tab3:
                                         rows, stats = parse_lotte_card(file_bytes, "롯데카드", card_no)
                                         matched = True
                                         break
+                                    if '매출일자' in _vals and '가맹점명' in _vals and '고객사명' in _vals:
+                                        rows, stats = parse_woori_card(file_bytes, "우리카드", card_no)
+                                        matched = True
+                                        break
                                 if not matched:
-                                    errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})\n지원: 삼성/하나/신한/비씨/NH농협/현대/국민/IBK기업BC/카카오뱅크/롯데카드")
+                                    errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})\n지원: 삼성/하나/신한/비씨/NH농협/현대/국민/IBK기업BC/카카오뱅크/롯데카드/우리카드")
                                     continue
                             except Exception:
-                                errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})\n지원: 삼성/하나/신한/비씨/NH농협/현대/국민/IBK기업BC/카카오뱅크/롯데카드")
+                                errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})\n지원: 삼성/하나/신한/비씨/NH농협/현대/국민/IBK기업BC/카카오뱅크/롯데카드/우리카드")
                                 continue
                         # 직원없음이면 복리후생비(811) → 여비교통비(812)
                         if "직원없음" in info.get("직원유무", ""):
