@@ -208,6 +208,7 @@ DEFAULT_RULES = {
         {"match": ["병원","의원","한의원","치과"], "account": "복리후생비", "vat": "불공제"},
         {"match": ["약국"], "account": "복리후생비", "vat": "불공제"},
         {"match": ["우체국"], "account": "통신비", "vat": "불공제"},
+        {"match": ["헤어","복권"], "account": "접대비", "vat": "불공제"},
     ],
     "industry": [
         {"match": ["주유소"], "account": "차량유지비", "vat": "공제"},
@@ -265,6 +266,10 @@ def process_card_data(vendor, date, total, bizno, upjong, card_company, card_num
     for v, u in zip(vendor, upjong):
         acc, vd, m = classify_transaction(v, u, DEFAULT_RULES)
         accounts.append(acc); vat_deds.append(vd); methods.append(m)
+    # 세금과공과금(817)은 항상 부가세 불공제
+    for i, acc in enumerate(accounts):
+        if acc == '세금과공과금':
+            vat_deds[i] = '불공제'
     vat_types = [57 if v == "공제" else "" for v in vat_deds]
     account_codes = [ACCOUNT_CODE_MAP.get(a, "") for a in accounts]
     result = pd.DataFrame({
@@ -1122,6 +1127,14 @@ with tab3:
                             except Exception:
                                 errors.append(f"⚠️ {uf.name}: 지원하지 않는 카드사 ({card_co})\n지원: 삼성/하나/신한/비씨/NH농협/현대/국민/IBK기업BC/카카오뱅크/롯데카드")
                                 continue
+                        # 직원없음이면 복리후생비(811) → 여비교통비(812)
+                        if "직원없음" in info.get("직원유무", ""):
+                            mask_811 = stats['계정과목'] == '복리후생비'
+                            if mask_811.any():
+                                stats.loc[mask_811, '계정과목'] = '여비교통비'
+                                rows.loc[mask_811, '계정과목'] = ACCOUNT_CODE_MAP.get('여비교통비', '812')
+                                rows.loc[mask_811, '부가세공제여부'] = '공제'
+                                rows.loc[mask_811, '부가세유형'] = 57
                         all_rows.append(rows)
                         all_stats.append(stats)
                     except Exception as e:
