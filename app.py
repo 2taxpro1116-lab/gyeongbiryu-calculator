@@ -283,6 +283,22 @@ def process_card_data(vendor, date, total, bizno, upjong, card_company, card_num
 
 
 def parse_samsung_card(file_bytes, card_company, card_number):
+    # ── 신형 삼성카드: header=0, 매출금액(원) 컬럼 ──
+    df_check0 = pd.read_excel(io.BytesIO(file_bytes), header=0, nrows=0)
+    cols0 = [str(c).strip() for c in df_check0.columns]
+    if '매출금액(원)' in cols0 and '매출일자' in cols0 and '가맹점명' in cols0:
+        df = pd.read_excel(io.BytesIO(file_bytes), header=0)
+        df.columns = [str(c).strip() for c in df.columns]
+        date   = pd.to_datetime(df['매출일자'].astype(str), format='%Y%m%d', errors='coerce')
+        vendor = df['가맹점명'].astype(str).str.strip()
+        total  = pd.to_numeric(df['매출금액(원)'], errors='coerce').fillna(0).astype(int)
+        bizno  = df['사업자등록번호'].astype(str).str.replace('-', '').str[:10] if '사업자등록번호' in df.columns else pd.Series([''] * len(df))
+        upjong = pd.Series([''] * len(df))
+        mask = date.notna() & (total > 0)
+        return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
+                                 total[mask].reset_index(drop=True), bizno[mask].reset_index(drop=True),
+                                 upjong[mask].reset_index(drop=True), card_company, card_number)
+
     df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None)
 
     # 헤더 행 탐색
@@ -552,7 +568,7 @@ def parse_ibk_bc_card(file_bytes, card_company, card_number):
 
 
 def parse_hyundai_card(file_bytes, card_company, card_number):
-    """현대카드 파싱 - 이용일/가맹점명/이용 금액/사업자등록번호, 날짜 YYYY.MM.DD"""
+    """현대카드 파싱 - YYYY.MM.DD 형식 및 Excel 시리얼 날짜, 이용금액 '원' 처리 포함"""
     df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
     header_idx = 8
     for i, row in df_raw.iterrows():
@@ -564,11 +580,20 @@ def parse_hyundai_card(file_bytes, card_company, card_number):
     df.columns = [str(c).strip() for c in df.columns]
     if '상태' in df.columns:
         df = df[df['상태'] == '정상'].reset_index(drop=True)
-    amount_col = '이용 금액' if '이용 금액' in df.columns else '승인 금액'
-    date   = pd.to_datetime(df['이용일'].astype(str).str.replace('.', '-', regex=False), errors='coerce')
+    # 금액 컬럼: '이용 금액'(공백 있음), '이용금액'(공백 없음), '승인 금액', '승인금액' 순으로 탐색
+    amount_col = next((c for c in ['이용 금액', '이용금액', '승인 금액', '승인금액'] if c in df.columns), None)
+    if amount_col is None:
+        raise ValueError(f"현대카드: 금액 컬럼을 찾을 수 없습니다. 컬럼: {list(df.columns)}")
+    # 날짜: YYYY.MM.DD 형식 시도 후 대부분 NaT이면 Excel 시리얼 숫자로 재처리
+    date = pd.to_datetime(df['이용일'].astype(str).str.replace('.', '-', regex=False), errors='coerce')
+    if date.isna().mean() > 0.5:
+        serial = pd.to_numeric(df['이용일'], errors='coerce')
+        date = serial.apply(lambda x: pd.Timestamp('1899-12-30') + pd.Timedelta(days=x) if pd.notna(x) else pd.NaT)
     vendor = df['가맹점명'].astype(str).str.strip()
-    total  = pd.to_numeric(df[amount_col].astype(str).str.replace(',', '', regex=False), errors='coerce').fillna(0).astype(int)
-    bizno  = df['사업자등록번호'].astype(str).str.replace('-', '').str[:10] if '사업자등록번호' in df.columns else pd.Series([''] * len(df))
+    # 금액: 쉼표·'원' 제거
+    total  = pd.to_numeric(df[amount_col].astype(str).str.replace(',', '', regex=False).str.replace('원', '', regex=False).str.strip(), errors='coerce').fillna(0).astype(int)
+    bizno_col = next((c for c in ['사업자등록번호', '사업자번호'] if c in df.columns), None)
+    bizno  = df[bizno_col].astype(str).str.replace('-', '').str[:10] if bizno_col else pd.Series([''] * len(df))
     upjong = pd.Series([''] * len(df))
     mask = date.notna() & (total > 0)
     return process_card_data(vendor[mask].reset_index(drop=True), date[mask].reset_index(drop=True),
@@ -618,10 +643,12 @@ def parse_bc_card(file_bytes, card_company, card_number):
         # 소계/합계 행 제외: 고객사명 없는 행
         if "고객사명" in df.columns:
             df = df[df["고객사명"].notna()].reset_index(drop=True)
-        date   = pd.to_datetime(df["매출일자"], errors="coerce")
+        # 날짜: "2026.01.01" 또는 일반 날짜 형식
+        date   = pd.to_datetime(df["매출일자"].astype(str).str.replace('.', '-', regex=False), errors="coerce")
         vendor = df["가맹점명"].astype(str).str.strip()
-        total  = pd.to_numeric(df["매출금액"], errors="coerce").fillna(0).astype(int)
-        bizno_col = "사업자등록번호" if "사업자등록번호" in df.columns else None
+        # 금액: "42,100 원" 형식 처리 (쉼표·'원' 제거)
+        total  = pd.to_numeric(df["매출금액"].astype(str).str.replace(',', '').str.replace('원', '').str.strip(), errors="coerce").fillna(0).astype(int)
+        bizno_col = next((c for c in ["사업자등록번호", "사업자번호"] if c in df.columns), None)
         bizno  = df[bizno_col].astype(str).str.replace("-", "").str[:10] if bizno_col else pd.Series([""] * len(df))
         upjong = pd.Series([""] * len(df))
         mask = date.notna() & (total > 0)
