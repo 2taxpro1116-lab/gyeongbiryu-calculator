@@ -836,7 +836,7 @@ def write_to_template(rows_df, company_name, business_number):
     ws.cell(9, 9).value = int(rows_df['세액'].sum())
     ws.cell(9, 10).value = int(rows_df['봉사료'].sum())
     ws.cell(9, 11).value = int(rows_df['합계금액'].sum())
-    wb.save(tmp_path); fix_html_entities(tmp_path)
+    wb.save(tmp_path)
     with open(tmp_path, 'rb') as f: data = f.read()
     os.remove(tmp_path)
     return data
