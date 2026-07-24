@@ -642,20 +642,23 @@ def parse_hyundai_card(file_bytes, card_company, card_number):
 
 
 def parse_nh_card(file_bytes, card_company, card_number):
-    """NH농협카드 파싱 - header=3, 매출일자/매출금액/사업자번호/가맹점명"""
+    """NH농협카드 파싱 - 매출일자/가맹점명/매출금액(원 포함)/사업자번호, 소계·합계 행 제외"""
     df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
-    # 헤더 행 탐색: '매출일자'+'가맹점명' 포함 행
-    header_idx = 3
+    # 헤더 행 탐색: '매출일자'+'가맹점명'+'매출금액' 포함 행
+    header_idx = 13
     for i, row in df_raw.iterrows():
         vals = [str(v).strip() for v in row if pd.notna(v) and str(v).strip() not in ['', 'nan']]
-        if '매출일자' in vals and '가맹점명' in vals:
+        if '매출일자' in vals and '가맹점명' in vals and '매출금액' in vals:
             header_idx = i
             break
     df = pd.read_excel(io.BytesIO(file_bytes), header=header_idx)
-    df.columns = [str(c).strip() for c in df.columns]
+    df.columns = [str(c).strip().replace('\n', '') for c in df.columns]
     date   = pd.to_datetime(df['매출일자'], errors='coerce')
     vendor = df['가맹점명'].astype(str).str.strip()
-    total  = pd.to_numeric(df['매출금액'], errors='coerce').fillna(0).astype(int)
+    total  = pd.to_numeric(
+        df['매출금액'].astype(str).str.replace(',', '', regex=False).str.replace('원', '', regex=False).str.strip(),
+        errors='coerce'
+    ).fillna(0).astype(int)
     bizno  = df['사업자번호'].astype(str).str.replace('-', '').str[:10] if '사업자번호' in df.columns else pd.Series([''] * len(df))
     upjong = pd.Series([''] * len(df))
     mask = date.notna() & (total > 0)
