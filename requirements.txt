@@ -3,3 +3,6 @@ anthropic
 pandas
 openpyxl
 python-dotenv
+pypdf
+Pillow
+pymupdf

@@ -846,7 +846,7 @@ def write_to_template(rows_df, company_name, business_number):
 
 
 # ── 탭 구성 ──────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📊 경비율 계산기", "🧾 종합소득세 계산기", "💳 카드사 변환기"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 경비율 계산기", "🧾 종합소득세 계산기", "💳 카드사 변환기", "📁 파일 변환"])
 
 
 # ════════════════════════════════════════════════════
@@ -1269,3 +1269,136 @@ with tab3:
                     buf = io.BytesIO()
                     stats_df.to_excel(buf, index=False, engine='openpyxl')
                     st.download_button("📊 분류 리포트 다운로드", buf.getvalue(), f"분류리포트_{ts}.xlsx")
+
+
+# ════════════════════════════════════════════════════
+# TAB 4 : 파일 변환
+# ════════════════════════════════════════════════════
+with tab4:
+    st.title("📁 파일 변환")
+    st.caption("PDF 병합 / JPG→PDF / PDF→JPG 변환을 지원합니다.")
+
+    sub1, sub2, sub3 = st.tabs(["📎 PDF 병합", "🖼 JPG → PDF", "📄 PDF → JPG"])
+
+    # ── PDF 병합 ──────────────────────────────────────
+    with sub1:
+        st.subheader("📎 PDF 병합")
+        st.caption("여러 PDF 파일을 순서대로 하나로 합칩니다.")
+        pdf_files = st.file_uploader(
+            "PDF 파일 선택 (여러 개 가능, 목록 순서대로 병합)",
+            type=["pdf"], accept_multiple_files=True, key="merge_pdfs"
+        )
+        if pdf_files:
+            st.info(f"{len(pdf_files)}개 파일 선택됨")
+            for i, f in enumerate(pdf_files, 1):
+                st.text(f"  {i}. {f.name}")
+            if st.button("병합 시작", key="btn_merge", type="primary", use_container_width=True):
+                try:
+                    from pypdf import PdfWriter
+                    writer = PdfWriter()
+                    for f in pdf_files:
+                        writer.append(io.BytesIO(f.read()))
+                    buf = io.BytesIO()
+                    writer.write(buf)
+                    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    st.download_button(
+                        label="📥 병합된 PDF 다운로드",
+                        data=buf.getvalue(),
+                        file_name=f"병합_{ts}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                        type="primary"
+                    )
+                    st.success(f"✅ {len(pdf_files)}개 파일 병합 완료")
+                except Exception as e:
+                    st.error(f"병합 오류: {e}")
+
+    # ── JPG → PDF ─────────────────────────────────────
+    with sub2:
+        st.subheader("🖼 JPG → PDF")
+        st.caption("이미지 파일(JPG/PNG)을 하나의 PDF로 변환합니다.")
+        img_files = st.file_uploader(
+            "이미지 파일 선택 (여러 개 가능, 목록 순서대로 페이지 구성)",
+            type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="imgs_to_pdf"
+        )
+        if img_files:
+            st.info(f"{len(img_files)}개 파일 선택됨")
+            cols = st.columns(min(len(img_files), 4))
+            for i, f in enumerate(img_files):
+                cols[i % 4].image(f, caption=f.name, use_container_width=True)
+            if st.button("PDF 변환", key="btn_img2pdf", type="primary", use_container_width=True):
+                try:
+                    from PIL import Image as PILImage
+                    images = []
+                    for f in img_files:
+                        img = PILImage.open(io.BytesIO(f.read())).convert("RGB")
+                        images.append(img)
+                    buf = io.BytesIO()
+                    if len(images) == 1:
+                        images[0].save(buf, format="PDF")
+                    else:
+                        images[0].save(buf, format="PDF", save_all=True, append_images=images[1:])
+                    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    st.download_button(
+                        label="📥 PDF 다운로드",
+                        data=buf.getvalue(),
+                        file_name=f"이미지변환_{ts}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                        type="primary"
+                    )
+                    st.success(f"✅ {len(images)}페이지 PDF 변환 완료")
+                except Exception as e:
+                    st.error(f"변환 오류: {e}")
+
+    # ── PDF → JPG ─────────────────────────────────────
+    with sub3:
+        st.subheader("📄 PDF → JPG")
+        st.caption("PDF의 각 페이지를 JPG 이미지로 변환합니다. 여러 페이지는 ZIP으로 다운로드됩니다.")
+        pdf_file = st.file_uploader(
+            "PDF 파일 선택", type=["pdf"], key="pdf_to_img"
+        )
+        dpi = st.select_slider("해상도(DPI)", options=[72, 96, 150, 200, 300], value=150)
+        if pdf_file:
+            if st.button("JPG 변환", key="btn_pdf2jpg", type="primary", use_container_width=True):
+                try:
+                    import fitz
+                    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+                    zoom = dpi / 72
+                    mat = fitz.Matrix(zoom, zoom)
+                    page_images = []
+                    for page_num in range(len(doc)):
+                        pix = doc[page_num].get_pixmap(matrix=mat)
+                        page_images.append(pix.tobytes("jpeg"))
+                    doc.close()
+                    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    if len(page_images) == 1:
+                        st.download_button(
+                            label="📥 JPG 다운로드",
+                            data=page_images[0],
+                            file_name=f"페이지1_{ts}.jpg",
+                            mime="image/jpeg",
+                            use_container_width=True,
+                            type="primary"
+                        )
+                    else:
+                        zip_buf = io.BytesIO()
+                        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                            for i, img_bytes in enumerate(page_images, 1):
+                                zf.writestr(f"페이지{i:03d}.jpg", img_bytes)
+                        st.download_button(
+                            label=f"📥 ZIP 다운로드 ({len(page_images)}페이지)",
+                            data=zip_buf.getvalue(),
+                            file_name=f"PDF변환_{ts}.zip",
+                            mime="application/zip",
+                            use_container_width=True,
+                            type="primary"
+                        )
+                    st.success(f"✅ {len(page_images)}페이지 JPG 변환 완료")
+                    cols = st.columns(min(len(page_images), 3))
+                    for i, img_bytes in enumerate(page_images[:6]):
+                        cols[i % 3].image(img_bytes, caption=f"페이지 {i+1}", use_container_width=True)
+                    if len(page_images) > 6:
+                        st.caption(f"… 외 {len(page_images)-6}페이지 더 있음")
+                except Exception as e:
+                    st.error(f"변환 오류: {e}")
