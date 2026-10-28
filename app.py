@@ -846,7 +846,7 @@ def write_to_template(rows_df, company_name, business_number):
 
 
 # ── 탭 구성 ──────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["📊 경비율 계산기", "🧾 종합소득세 계산기", "💳 카드사 변환기", "📁 파일 변환"])
+tab1, tab2, tab_gibu, tab3, tab4 = st.tabs(["📊 경비율 계산기", "🧾 종합소득세 계산기", "🎁 기부금 한도", "💳 카드사 변환기", "📁 파일 변환"])
 
 
 # ════════════════════════════════════════════════════
@@ -1069,6 +1069,114 @@ with tab2:
 
         st.caption(f"※ 적용 세율: {적용세율*100:.0f}% / 누진공제: {누진공제액:,.0f}원 / 지방소득세는 납부세액의 10%")
         st.caption("※ 본 계산은 추정값이며 실제 세액은 세무사 확인 후 신고하시기 바랍니다.")
+
+
+# ════════════════════════════════════════════════════
+# TAB : 기부금 한도 계산기
+# ════════════════════════════════════════════════════
+with tab_gibu:
+    st.title("🎁 기부금 한도 계산기")
+    st.caption("소득금액과 기부금을 입력하면 기부금 종류별 한도와 인정액·한도초과액을 계산합니다. (소득세법 제34조, 제59조의4 ④)")
+
+    g_소득 = st.number_input("소득금액 (원)", min_value=0, value=0, step=100000, format="%d", key="gibu_income")
+    gc1, gc2, gc3 = st.columns(3)
+    with gc1:
+        g_법정 = st.number_input("법정기부금 (원)", min_value=0, value=0, step=10000, format="%d",
+                                key="gibu_legal", help="특례기부금: 국가·지자체, 국방헌금, 이재민 구호금품, 사립학교 등")
+    with gc2:
+        g_일반 = st.number_input("일반 지정기부금 (원)", min_value=0, value=0, step=10000, format="%d",
+                                key="gibu_general", help="종교단체 외 일반기부금: 사회복지법인, 노동조합비 등")
+    with gc3:
+        g_종교 = st.number_input("종교단체 지정기부금 (원)", min_value=0, value=0, step=10000, format="%d",
+                                key="gibu_religious")
+
+    if st.button("기부금 한도 계산", use_container_width=True, type="primary", key="btn_gibu"):
+        # ① 법정기부금: 소득금액 100% 한도
+        법정한도 = g_소득
+        법정인정 = min(g_법정, 법정한도)
+        법정초과 = g_법정 - 법정인정
+
+        # ② 일반기부금 한도 기준금액 = 소득금액 - 법정기부금 인정액
+        기준금액 = max(g_소득 - 법정인정, 0)
+        if g_종교 > 0:
+            기본10 = int(기준금액 * 0.10)
+            추가20 = int(기준금액 * 0.20)
+            추가인정 = min(추가20, g_일반)
+            일반한도 = 기본10 + 추가인정
+        else:
+            일반한도 = int(기준금액 * 0.30)
+
+        # 공제 순서: 종교단체 외 일반기부금 → 종교단체 기부금
+        일반인정 = min(g_일반, 일반한도)
+        종교인정 = min(g_종교, 일반한도 - 일반인정)
+        일반초과 = g_일반 - 일반인정
+        종교초과 = g_종교 - 종교인정
+
+        st.divider()
+        st.subheader("📐 계산 과정")
+
+        st.markdown("**① 법정기부금 (특례기부금)**")
+        steps = [
+            ("한도액", f"{법정한도:,.0f} 원", f"소득금액 {g_소득:,.0f} × 100%"),
+            ("기부금액", f"{g_법정:,.0f} 원", ""),
+            ("인정액", f"{법정인정:,.0f} 원", "MIN(기부금액, 한도액)"),
+        ]
+        for label, value, note in steps:
+            r1, r2, r3 = st.columns([3, 3, 4])
+            r1.write(label); r2.write(value)
+            if note: r3.caption(note)
+
+        st.markdown("**② 일반기부금 한도 기준금액**")
+        r1, r2, r3 = st.columns([3, 3, 4])
+        r1.write("기준금액"); r2.write(f"{기준금액:,.0f} 원")
+        r3.caption(f"소득금액 {g_소득:,.0f} − 법정기부금 인정액 {법정인정:,.0f}")
+
+        if g_종교 > 0:
+            st.markdown("**③ 일반기부금 한도 (종교단체 기부금 있음)**")
+            steps = [
+                ("기준금액 × 10%", f"{기본10:,.0f} 원", f"{기준금액:,.0f} × 10%"),
+                ("MIN(기준금액×20%, 종교외)", f"{추가인정:,.0f} 원",
+                 f"MIN({추가20:,.0f}, {g_일반:,.0f})"),
+                ("= 한도액", f"{일반한도:,.0f} 원", "기준금액×10% + MIN(기준금액×20%, 종교단체 외 기부금)"),
+            ]
+        else:
+            st.markdown("**③ 일반기부금 한도 (종교단체 기부금 없음)**")
+            steps = [("= 한도액", f"{일반한도:,.0f} 원", f"기준금액 {기준금액:,.0f} × 30%")]
+        for label, value, note in steps:
+            r1, r2, r3 = st.columns([3, 3, 4])
+            r1.write(label); r2.write(value)
+            if note: r3.caption(note)
+
+        st.markdown("**④ 한도 내 인정 (종교단체 외 → 종교단체 순)**")
+        steps = [
+            ("일반 지정기부금 인정", f"{일반인정:,.0f} 원", f"MIN({g_일반:,.0f}, 한도 {일반한도:,.0f})"),
+            ("종교단체 기부금 인정", f"{종교인정:,.0f} 원",
+             f"MIN({g_종교:,.0f}, 잔여한도 {일반한도 - 일반인정:,.0f})"),
+        ]
+        for label, value, note in steps:
+            r1, r2, r3 = st.columns([3, 3, 4])
+            r1.write(label); r2.write(value)
+            if note: r3.caption(note)
+
+        st.divider()
+        st.subheader("📊 결과 요약")
+        summary = pd.DataFrame({
+            "구분": ["법정기부금", "일반 지정기부금", "종교단체 지정기부금", "합계"],
+            "기부금액": [g_법정, g_일반, g_종교, g_법정 + g_일반 + g_종교],
+            "한도액": [법정한도, 일반한도, 일반한도 - 일반인정, None],
+            "인정액": [법정인정, 일반인정, 종교인정, 법정인정 + 일반인정 + 종교인정],
+            "한도초과액(이월)": [법정초과, 일반초과, 종교초과, 법정초과 + 일반초과 + 종교초과],
+        })
+        for col in ["기부금액", "한도액", "인정액", "한도초과액(이월)"]:
+            summary[col] = summary[col].apply(lambda x: "" if pd.isna(x) else f"{int(x):,}")
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+
+        m1, m2 = st.columns(2)
+        m1.metric("✅ 한도 내 인정액 합계", f"{법정인정 + 일반인정 + 종교인정:,.0f}원")
+        m2.metric("↪️ 한도초과액 (10년 이월)", f"{법정초과 + 일반초과 + 종교초과:,.0f}원")
+
+        st.caption("※ 종교단체 기부금의 한도액은 일반 지정기부금 인정 후 남은 한도입니다.")
+        st.caption("※ 한도초과액은 다음 과세기간부터 10년간 이월공제 가능 (소득세법 제34조 ⑤). 이월결손금은 반영하지 않았습니다.")
 
 
 # ════════════════════════════════════════════════════
